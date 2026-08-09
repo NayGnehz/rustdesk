@@ -1,0 +1,233 @@
+name: Android ARM64 APK
+
+on:
+  push:
+    branches:
+      - codex/android-gesture-controls
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: "1.75"
+  CARGO_NDK_VERSION: "3.1.2"
+  ANDROID_FLUTTER_VERSION: "3.24.5"
+  NDK_VERSION: "r28c"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+jobs:
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+    permissions:
+      contents: read
+
+  build-arm64:
+    name: Build Android arm64-v8a APK
+    needs: generate-bridge
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: false
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: Export GitHub Actions cache variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            curl \
+            gcc-multilib \
+            git \
+            g++ \
+            g++-multilib \
+            libayatana-appindicator3-dev \
+            libasound2-dev \
+            libc6-dev \
+            libclang-dev \
+            libunwind-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgtk-3-dev \
+            libpam0g-dev \
+            libpulse-dev \
+            libva-dev \
+            libxcb-randr0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxdo-dev \
+            libxfixes-dev \
+            llvm-dev \
+            nasm \
+            ninja-build \
+            openjdk-17-jdk-headless \
+            pkg-config \
+            tree \
+            unzip \
+            wget
+
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        with:
+          channel: stable
+          flutter-version: ${{ env.ANDROID_FLUTTER_VERSION }}
+
+      - name: Patch Flutter
+        shell: bash
+        run: |
+          pushd "$(dirname "$(dirname "$(command -v flutter)")")"
+          if [[ "3.24.5" == "${ANDROID_FLUTTER_VERSION}" ]]; then
+            git apply "${GITHUB_WORKSPACE}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
+          fi
+          popd
+
+      - name: Install Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+
+      - name: Set up vcpkg cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install Android dependencies
+        shell: bash
+        run: |
+          if ! ./flutter/build_android_deps.sh arm64-v8a; then
+            find "${VCPKG_ROOT}/" -name "*.log" -print -exec cat {} \;
+            exit 1
+          fi
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Check gesture formatting
+        working-directory: flutter
+        run: >-
+          dart format --output=none --set-exit-if-changed
+          lib/common/widgets/gestures.dart
+          lib/common/widgets/multi_finger_input_state.dart
+          lib/common/widgets/remote_input.dart
+          lib/mobile/pages/remote_page.dart
+          lib/mobile/widgets/gesture_help.dart
+          test/custom_touch_gesture_recognizer_test.dart
+          test/multi_finger_input_state_test.dart
+
+      - name: Run gesture tests
+        working-directory: flutter
+        run: >-
+          flutter test
+          test/custom_touch_gesture_recognizer_test.dart
+          test/multi_finger_input_state_test.dart
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          prefix-key: rustdesk-lib-cache-android
+          key: aarch64-linux-android
+
+      - name: Build Rust library
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          rustup target add aarch64-linux-android
+          cargo install cargo-ndk --version "${CARGO_NDK_VERSION}" --locked
+          ./flutter/ndk_arm64.sh
+
+      - name: Build release APK
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+        run: |
+          export PATH="${JAVA_HOME}/bin:${PATH}"
+          sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
+          sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
+          mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
+          cp "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" ./flutter/android/app/src/main/jniLibs/arm64-v8a/
+          cp ./target/aarch64-linux-android/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
+          pushd flutter
+          flutter build apk --release --target-platform android-arm64 --split-per-abi
+          popd
+
+      - name: Verify and package APK
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_apk="flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk"
+          output_dir="artifacts"
+          output_apk="${output_dir}/rustdesk-naygnehz-arm64-v8a.apk"
+          mkdir -p "${output_dir}"
+          cp "${source_apk}" "${output_apk}"
+
+          build_tools_dir="$(find "${ANDROID_SDK_ROOT}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          "${build_tools_dir}/apksigner" verify --verbose --print-certs "${output_apk}"
+          badging="$("${build_tools_dir}/aapt" dump badging "${output_apk}")"
+          package_name="$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" <<< "${badging}")"
+          application_label="$(sed -n "s/^application-label:'\([^']*\)'.*/\1/p" <<< "${badging}")"
+          test "${package_name}" = "com.naygnehz.rustdesk"
+          test "${application_label}" = "RustDesk"
+
+          archive_entries="$(unzip -Z1 "${output_apk}")"
+          mapfile -t packaged_abis < <(printf '%s\n' "${archive_entries}" | sed -n 's#^lib/\([^/]*\)/.*#\1#p' | sort -u)
+          test "${#packaged_abis[@]}" -eq 1
+          test "${packaged_abis[0]}" = "arm64-v8a"
+          grep -Fx 'lib/arm64-v8a/librustdesk.so' <<< "${archive_entries}" > /dev/null
+          grep -Fx 'lib/arm64-v8a/libc++_shared.so' <<< "${archive_entries}" > /dev/null
+
+          (cd "${output_dir}" && sha256sum "$(basename "${output_apk}")") | tee "${output_apk}.sha256"
+          echo "apk=${output_apk}" >> "${GITHUB_OUTPUT}"
+          echo "sha256=${output_apk}.sha256" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rustdesk-naygnehz-arm64-v8a-${{ github.run_number }}
+          path: |
+            ${{ steps.package.outputs.apk }}
+            ${{ steps.package.outputs.sha256 }}
+          if-no-files-found: error
+          retention-days: 14

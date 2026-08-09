@@ -17,6 +17,7 @@ import 'package:provider/provider.dart';
 import '../../common.dart';
 import '../../common/widgets/overlay.dart';
 import '../../common/widgets/dialog.dart';
+import '../../common/widgets/gestures.dart';
 import '../../common/widgets/remote_input.dart';
 import '../../models/input_model.dart';
 import '../../models/model.dart';
@@ -891,6 +892,11 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                 bind.mainSetLocalOption(key: kOptionTouchMode, value: v);
               },
               virtualMouseMode: gFFI.ffiModel.virtualMouseMode,
+              multiFingerGestureMode: resolveMultiFingerGestureMode(
+                isAndroidController: isAndroid,
+                isCamera: false,
+                isPeerAndroid: gFFI.ffiModel.isPeerAndroid,
+              ),
               inputModel: gFFI.inputModel,
             )));
   }

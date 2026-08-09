@@ -775,5 +775,8 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("whitelist_cidr_tip", "CIDR नोटेशन समर्थित है, उदाहरण के लिए 192.168.1.0/24"),
         ("Continue", ""),
         ("Browser didn't open? Use the url below to sign in.", ""),
+        ("Two-finger vertical swipe", ""),
+        ("Three-finger move", ""),
+        ("Three-finger pinch", ""),
     ].iter().cloned().collect();
 }

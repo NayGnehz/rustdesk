@@ -1,25 +1,75 @@
 import 'dart:async';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
-import 'package:flutter_hbb/common/widgets/remote_input.dart';
+
+enum MultiFingerGestureMode {
+  legacy,
+  twoFingerScrollThreeFingerScale,
+}
+
+class MultiFingerGestureHelpKeys {
+  const MultiFingerGestureHelpKeys({
+    required this.scroll,
+    required this.move,
+    required this.zoom,
+  });
+
+  final String scroll;
+  final String move;
+  final String zoom;
+}
+
+MultiFingerGestureHelpKeys resolveMultiFingerGestureHelpKeys(
+    MultiFingerGestureMode mode) {
+  if (mode == MultiFingerGestureMode.twoFingerScrollThreeFingerScale) {
+    return const MultiFingerGestureHelpKeys(
+      scroll: 'Two-finger vertical swipe',
+      move: 'Three-finger move',
+      zoom: 'Three-finger pinch',
+    );
+  }
+  return const MultiFingerGestureHelpKeys(
+    scroll: 'Three-Finger vertically',
+    move: 'Two-Finger Move',
+    zoom: 'Pinch to Zoom',
+  );
+}
+
+MultiFingerGestureMode resolveMultiFingerGestureMode({
+  required bool isAndroidController,
+  required bool isCamera,
+  required bool isPeerAndroid,
+}) {
+  if (isAndroidController && !isCamera && !isPeerAndroid) {
+    return MultiFingerGestureMode.twoFingerScrollThreeFingerScale;
+  }
+  return MultiFingerGestureMode.legacy;
+}
 
 enum GestureState {
   none,
   oneFingerPan,
   twoFingerScale,
-  threeFingerVerticalDrag
+  threeFingerVerticalDrag,
+  twoFingerScroll,
+  threeFingerScale,
 }
 
 class CustomTouchGestureRecognizer extends ScaleGestureRecognizer {
   CustomTouchGestureRecognizer({
     Object? debugOwner,
     Set<PointerDeviceKind>? supportedDevices,
+    this.multiFingerGestureMode = MultiFingerGestureMode.legacy,
   }) : super(
           debugOwner: debugOwner,
           supportedDevices: supportedDevices,
         ) {
     _init();
   }
+
+  static const _multiToOneFingerDelay = Duration(milliseconds: 200);
+
+  MultiFingerGestureMode multiFingerGestureMode;
 
   // oneFingerPan
   GestureDragStartCallback? onOneFingerPanStart;
@@ -32,134 +82,235 @@ class CustomTouchGestureRecognizer extends ScaleGestureRecognizer {
   GestureScaleUpdateCallback? onTwoFingerScaleUpdate;
   GestureScaleEndCallback? onTwoFingerScaleEnd;
 
+  // twoFingerScroll
+  GestureScaleStartCallback? onTwoFingerScrollStart;
+  GestureScaleUpdateCallback? onTwoFingerScrollUpdate;
+  GestureScaleEndCallback? onTwoFingerScrollEnd;
+
   // threeFingerVerticalDrag
   GestureDragStartCallback? onThreeFingerVerticalDragStart;
   GestureDragUpdateCallback? onThreeFingerVerticalDragUpdate;
   GestureDragEndCallback? onThreeFingerVerticalDragEnd;
 
+  // threeFingerScale : scale + pan event
+  GestureScaleStartCallback? onThreeFingerScaleStart;
+  GestureScaleUpdateCallback? onThreeFingerScaleUpdate;
+  GestureScaleEndCallback? onThreeFingerScaleEnd;
+
   var _currentState = GestureState.none;
   Timer? _debounceTimer;
+  ScaleUpdateDetails? _pendingOneFingerDetails;
+  bool _deferOneFingerAfterMultiEnd = false;
 
   void _init() {
     debugPrint("CustomTouchGestureRecognizer init");
-    // onStart = (d) {};
-    onUpdate = (d) {
-      _debounceTimer?.cancel();
-      if (d.pointerCount == 1 && _currentState != GestureState.oneFingerPan) {
-        onOneFingerStartDebounce(d);
-      } else if (d.pointerCount == 2 &&
-          _currentState != GestureState.twoFingerScale) {
-        onTwoFingerStartDebounce(d);
-      } else if (d.pointerCount == 3 &&
-          _currentState != GestureState.threeFingerVerticalDrag) {
-        _currentState = GestureState.threeFingerVerticalDrag;
-        if (onThreeFingerVerticalDragStart != null) {
-          onThreeFingerVerticalDragStart!(
-              DragStartDetails(globalPosition: d.localFocalPoint));
-        }
-        debugPrint("start threeFingerScale");
-      }
-      if (_currentState != GestureState.none) {
-        switch (_currentState) {
-          case GestureState.oneFingerPan:
-            if (onOneFingerPanUpdate != null) {
-              onOneFingerPanUpdate!(_getDragUpdateDetails(d));
-            }
-            break;
-          case GestureState.twoFingerScale:
-            if (onTwoFingerScaleUpdate != null) {
-              onTwoFingerScaleUpdate!(d);
-            }
-            break;
-          case GestureState.threeFingerVerticalDrag:
-            if (onThreeFingerVerticalDragUpdate != null) {
-              onThreeFingerVerticalDragUpdate!(_getDragUpdateDetails(d));
-            }
-            break;
-          default:
-            break;
-        }
-        return;
-      }
-    };
+    onUpdate = _handleUpdate;
     onEnd = (d) {
       debugPrint("ScaleGestureRecognizer onEnd");
-      _debounceTimer?.cancel();
-      // end
-      switch (_currentState) {
-        case GestureState.oneFingerPan:
-          debugPrint("OneFingerState.pan onEnd");
-          if (onOneFingerPanEnd != null) {
-            onOneFingerPanEnd!(_getDragEndDetails(d));
-          }
-          break;
-        case GestureState.twoFingerScale:
-          debugPrint("TwoFingerState.scale onEnd");
-          if (onTwoFingerScaleEnd != null) {
-            onTwoFingerScaleEnd!(d);
-          }
-          if (isSpecialHoldDragActive) {
-            // If we are in special drag mode, we need to reset the state.
-            // Otherwise, the next `onTwoFingerScaleUpdate()` will handle a wrong `focalPoint`.
-            _currentState = GestureState.none;
-            return;
-          }
-          break;
-        case GestureState.threeFingerVerticalDrag:
-          debugPrint("ThreeFingerState.vertical onEnd");
-          if (onThreeFingerVerticalDragEnd != null) {
-            onThreeFingerVerticalDragEnd!(_getDragEndDetails(d));
-          }
-          break;
-        default:
-          break;
+      final shouldDeferOneFinger =
+          _isMultiFingerState(_currentState) || _deferOneFingerAfterMultiEnd;
+      _cancelPendingOneFingerStart();
+      _exitCurrentState(d);
+      if (shouldDeferOneFinger && d.pointerCount > 0) {
+        if (d.pointerCount > 3) {
+          _deferOneFingerAfterMultiEnd = true;
+        } else {
+          _armOneFingerDelayWindow();
+        }
       }
-      _debounceTimer = Timer(Duration(milliseconds: 200), () {
-        _currentState = GestureState.none;
-      });
     };
   }
 
-  // FIXME: This debounce logic is not working properly.
-  // If we move our finger very fast, we won't be able to detect the "oneFingerPan" event sometimes.
-  void onOneFingerStartDebounce(ScaleUpdateDetails d) {
-    start(ScaleUpdateDetails d) {
-      _currentState = GestureState.oneFingerPan;
-      if (onOneFingerPanStart != null) {
-        onOneFingerPanStart!(DragStartDetails(
-            localPosition: d.localFocalPoint, globalPosition: d.focalPoint));
-      }
-    }
-
-    if (_currentState != GestureState.none) {
-      _debounceTimer = Timer(Duration(milliseconds: 200), () {
-        start(d);
-        debugPrint("debounce start oneFingerPan");
-      });
-    } else {
-      start(d);
-      debugPrint("start oneFingerPan");
+  void _handleUpdate(ScaleUpdateDetails details) {
+    switch (details.pointerCount) {
+      case 1:
+        _handleOneFingerUpdate(details);
+        return;
+      case 2:
+      case 3:
+        _handleMultiFingerUpdate(details);
+        return;
+      default:
+        final shouldDeferOneFinger = details.pointerCount > 3 ||
+            _isMultiFingerState(_currentState) ||
+            _deferOneFingerAfterMultiEnd;
+        _debounceTimer?.cancel();
+        _debounceTimer = null;
+        _pendingOneFingerDetails = null;
+        _exitCurrentState(ScaleEndDetails(pointerCount: details.pointerCount));
+        _deferOneFingerAfterMultiEnd = shouldDeferOneFinger;
+        return;
     }
   }
 
-  void onTwoFingerStartDebounce(ScaleUpdateDetails d) {
-    start(ScaleUpdateDetails d) {
-      _currentState = GestureState.twoFingerScale;
-      if (onTwoFingerScaleStart != null) {
-        onTwoFingerScaleStart!(ScaleStartDetails(
-            localFocalPoint: d.localFocalPoint, focalPoint: d.focalPoint));
-      }
+  void _handleOneFingerUpdate(ScaleUpdateDetails details) {
+    if (_currentState == GestureState.oneFingerPan) {
+      onOneFingerPanUpdate?.call(_getDragUpdateDetails(details));
+      return;
     }
 
-    if (_currentState == GestureState.threeFingerVerticalDrag) {
-      _debounceTimer = Timer(Duration(milliseconds: 200), () {
-        start(d);
-        debugPrint("debounce start twoFingerScale");
-      });
-    } else {
-      start(d);
-      debugPrint("start twoFingerScale");
+    if (_isMultiFingerState(_currentState)) {
+      _exitCurrentState(ScaleEndDetails(pointerCount: details.pointerCount));
+      _scheduleOneFingerStart(details);
+      return;
     }
+
+    if (_deferOneFingerAfterMultiEnd) {
+      _scheduleOneFingerStart(details);
+      return;
+    }
+
+    if (_pendingOneFingerDetails != null) {
+      _pendingOneFingerDetails = details;
+      return;
+    }
+
+    _enterOneFingerState(details);
+    onOneFingerPanUpdate?.call(_getDragUpdateDetails(details));
+  }
+
+  void _handleMultiFingerUpdate(ScaleUpdateDetails details) {
+    _cancelPendingOneFingerStart();
+    final nextState = _stateForPointerCount(details.pointerCount);
+    if (_currentState != nextState) {
+      _exitCurrentState(ScaleEndDetails(pointerCount: details.pointerCount));
+      _enterMultiFingerState(nextState, details);
+    }
+    _dispatchMultiFingerUpdate(details);
+  }
+
+  GestureState _stateForPointerCount(int pointerCount) {
+    if (multiFingerGestureMode ==
+        MultiFingerGestureMode.twoFingerScrollThreeFingerScale) {
+      return pointerCount == 2
+          ? GestureState.twoFingerScroll
+          : GestureState.threeFingerScale;
+    }
+    return pointerCount == 2
+        ? GestureState.twoFingerScale
+        : GestureState.threeFingerVerticalDrag;
+  }
+
+  void _enterOneFingerState(ScaleUpdateDetails details) {
+    _currentState = GestureState.oneFingerPan;
+    onOneFingerPanStart?.call(DragStartDetails(
+      localPosition: details.localFocalPoint,
+      globalPosition: details.focalPoint,
+    ));
+  }
+
+  void _enterMultiFingerState(GestureState state, ScaleUpdateDetails details) {
+    _currentState = state;
+    final startDetails = ScaleStartDetails(
+      localFocalPoint: details.localFocalPoint,
+      focalPoint: details.focalPoint,
+      pointerCount: details.pointerCount,
+      sourceTimeStamp: details.sourceTimeStamp,
+    );
+    switch (state) {
+      case GestureState.twoFingerScale:
+        onTwoFingerScaleStart?.call(startDetails);
+        break;
+      case GestureState.threeFingerVerticalDrag:
+        onThreeFingerVerticalDragStart?.call(DragStartDetails(
+          localPosition: details.localFocalPoint,
+          globalPosition: details.focalPoint,
+        ));
+        break;
+      case GestureState.twoFingerScroll:
+        onTwoFingerScrollStart?.call(startDetails);
+        break;
+      case GestureState.threeFingerScale:
+        onThreeFingerScaleStart?.call(startDetails);
+        break;
+      default:
+        break;
+    }
+  }
+
+  void _dispatchMultiFingerUpdate(ScaleUpdateDetails details) {
+    switch (_currentState) {
+      case GestureState.twoFingerScale:
+        onTwoFingerScaleUpdate?.call(details);
+        break;
+      case GestureState.threeFingerVerticalDrag:
+        onThreeFingerVerticalDragUpdate?.call(_getDragUpdateDetails(details));
+        break;
+      case GestureState.twoFingerScroll:
+        onTwoFingerScrollUpdate?.call(details);
+        break;
+      case GestureState.threeFingerScale:
+        onThreeFingerScaleUpdate?.call(details);
+        break;
+      default:
+        break;
+    }
+  }
+
+  void _exitCurrentState(ScaleEndDetails details,
+      {bool cancelOneFinger = false}) {
+    final previousState = _currentState;
+    _currentState = GestureState.none;
+    switch (previousState) {
+      case GestureState.oneFingerPan:
+        if (cancelOneFinger) {
+          onOneFingerPanCancel?.call();
+        } else {
+          onOneFingerPanEnd?.call(_getDragEndDetails(details));
+        }
+        break;
+      case GestureState.twoFingerScale:
+        onTwoFingerScaleEnd?.call(details);
+        break;
+      case GestureState.threeFingerVerticalDrag:
+        onThreeFingerVerticalDragEnd?.call(_getDragEndDetails(details));
+        break;
+      case GestureState.twoFingerScroll:
+        onTwoFingerScrollEnd?.call(details);
+        break;
+      case GestureState.threeFingerScale:
+        onThreeFingerScaleEnd?.call(details);
+        break;
+      case GestureState.none:
+        break;
+    }
+  }
+
+  void _scheduleOneFingerStart(ScaleUpdateDetails details) {
+    _debounceTimer?.cancel();
+    _debounceTimer = null;
+    _deferOneFingerAfterMultiEnd = false;
+    _pendingOneFingerDetails = details;
+    _debounceTimer = Timer(_multiToOneFingerDelay, () {
+      _debounceTimer = null;
+      final pendingDetails = _pendingOneFingerDetails;
+      _pendingOneFingerDetails = null;
+      if (_currentState == GestureState.none && pendingDetails != null) {
+        _enterOneFingerState(pendingDetails);
+      }
+    });
+  }
+
+  void _armOneFingerDelayWindow() {
+    _deferOneFingerAfterMultiEnd = true;
+    _debounceTimer = Timer(_multiToOneFingerDelay, () {
+      _debounceTimer = null;
+      _deferOneFingerAfterMultiEnd = false;
+    });
+  }
+
+  void _cancelPendingOneFingerStart() {
+    _debounceTimer?.cancel();
+    _debounceTimer = null;
+    _pendingOneFingerDetails = null;
+    _deferOneFingerAfterMultiEnd = false;
+  }
+
+  bool _isMultiFingerState(GestureState state) {
+    return state == GestureState.twoFingerScale ||
+        state == GestureState.threeFingerVerticalDrag ||
+        state == GestureState.twoFingerScroll ||
+        state == GestureState.threeFingerScale;
   }
 
   DragUpdateDetails _getDragUpdateDetails(ScaleUpdateDetails d) =>
@@ -173,23 +324,16 @@ class CustomTouchGestureRecognizer extends ScaleGestureRecognizer {
 
   @override
   void rejectGesture(int pointer) {
+    _cancelPendingOneFingerStart();
+    _exitCurrentState(ScaleEndDetails(), cancelOneFinger: true);
     super.rejectGesture(pointer);
-    switch (_currentState) {
-      case GestureState.oneFingerPan:
-        if (onOneFingerPanCancel != null) {
-          onOneFingerPanCancel!();
-        }
-        break;
-      case GestureState.twoFingerScale:
-        // Reset scale state if needed, currently self-contained
-        break;
-      case GestureState.threeFingerVerticalDrag:
-        // Reset drag state if needed, currently self-contained
-        break;
-      default:
-        break;
-    }
+  }
+
+  @override
+  void dispose() {
+    _cancelPendingOneFingerStart();
     _currentState = GestureState.none;
+    super.dispose();
   }
 }
 
@@ -726,6 +870,7 @@ class _CountdownZoned {
 
 RawGestureDetector getMixinGestureDetector({
   Widget? child,
+  MultiFingerGestureMode multiFingerGestureMode = MultiFingerGestureMode.legacy,
   GestureTapUpCallback? onTapUp,
   GestureTapDownCallback? onDoubleTapDown,
   GestureDoubleTapCallback? onDoubleTap,
@@ -740,9 +885,18 @@ RawGestureDetector getMixinGestureDetector({
   GestureDragUpdateCallback? onOneFingerPanUpdate,
   GestureDragEndCallback? onOneFingerPanEnd,
   GestureDragCancelCallback? onOneFingerPanCancel,
+  GestureScaleStartCallback? onTwoFingerScaleStart,
   GestureScaleUpdateCallback? onTwoFingerScaleUpdate,
   GestureScaleEndCallback? onTwoFingerScaleEnd,
+  GestureDragStartCallback? onThreeFingerVerticalDragStart,
   GestureDragUpdateCallback? onThreeFingerVerticalDragUpdate,
+  GestureDragEndCallback? onThreeFingerVerticalDragEnd,
+  GestureScaleStartCallback? onTwoFingerScrollStart,
+  GestureScaleUpdateCallback? onTwoFingerScrollUpdate,
+  GestureScaleEndCallback? onTwoFingerScrollEnd,
+  GestureScaleStartCallback? onThreeFingerScaleStart,
+  GestureScaleUpdateCallback? onThreeFingerScaleUpdate,
+  GestureScaleEndCallback? onThreeFingerScaleEnd,
 }) {
   return RawGestureDetector(
       child: child,
@@ -785,13 +939,23 @@ RawGestureDetector getMixinGestureDetector({
             GestureRecognizerFactoryWithHandlers<CustomTouchGestureRecognizer>(
                 () => CustomTouchGestureRecognizer(), (instance) {
           instance
+            ..multiFingerGestureMode = multiFingerGestureMode
             ..onOneFingerPanStart = onOneFingerPanStart
             ..onOneFingerPanUpdate = onOneFingerPanUpdate
             ..onOneFingerPanEnd = onOneFingerPanEnd
             ..onOneFingerPanCancel = onOneFingerPanCancel
+            ..onTwoFingerScaleStart = onTwoFingerScaleStart
             ..onTwoFingerScaleUpdate = onTwoFingerScaleUpdate
             ..onTwoFingerScaleEnd = onTwoFingerScaleEnd
-            ..onThreeFingerVerticalDragUpdate = onThreeFingerVerticalDragUpdate;
+            ..onThreeFingerVerticalDragStart = onThreeFingerVerticalDragStart
+            ..onThreeFingerVerticalDragUpdate = onThreeFingerVerticalDragUpdate
+            ..onThreeFingerVerticalDragEnd = onThreeFingerVerticalDragEnd
+            ..onTwoFingerScrollStart = onTwoFingerScrollStart
+            ..onTwoFingerScrollUpdate = onTwoFingerScrollUpdate
+            ..onTwoFingerScrollEnd = onTwoFingerScrollEnd
+            ..onThreeFingerScaleStart = onThreeFingerScaleStart
+            ..onThreeFingerScaleUpdate = onThreeFingerScaleUpdate
+            ..onThreeFingerScaleEnd = onThreeFingerScaleEnd;
         }),
       });
 }

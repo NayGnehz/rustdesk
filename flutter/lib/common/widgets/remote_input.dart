@@ -12,6 +12,7 @@ import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/input_model.dart';
 
 import './gestures.dart';
+import './multi_finger_input_state.dart';
 
 class RawKeyFocusScope extends StatelessWidget {
   final FocusNode? focusNode;
@@ -55,8 +56,6 @@ class RawKeyFocusScope extends StatelessWidget {
 // Special hold-drag mode: one finger holds a button (left/right button), another finger pans.
 // This flag is to override the scale gesture to a pan gesture.
 bool isSpecialHoldDragActive = false;
-// Cache the last focal point to calculate deltas in special hold-drag mode.
-Offset _lastSpecialHoldDragFocalPoint = Offset.zero;
 
 class RawTouchGestureDetectorRegion extends StatefulWidget {
   final Widget child;
@@ -90,8 +89,9 @@ class _RawTouchGestureDetectorRegionState
   Offset _cacheLongPressPosition = Offset(0, 0);
   // Timestamp of the last long press event.
   int _cacheLongPressPositionTs = 0;
-  double _mouseScrollIntegral = 0; // mouse scroll speed controller
+  double _legacyMouseScrollIntegral = 0; // mouse scroll speed controller
   double _scale = 1;
+  final _multiFingerInputState = MultiFingerInputState();
 
   // Workaround tap down event when two fingers are used to scale(mobile)
   TapDownDetails? _lastTapDownDetails;
@@ -115,6 +115,12 @@ class _RawTouchGestureDetectorRegionState
   InputModel get inputModel => widget.inputModel;
   bool get handleTouch => (isDesktop || isWebDesktop) || ffiModel.touchMode;
   SessionID get sessionId => ffi.sessionId;
+  MultiFingerGestureMode get multiFingerGestureMode =>
+      resolveMultiFingerGestureMode(
+        isAndroidController: isAndroid,
+        isCamera: widget.isCamera,
+        isPeerAndroid: ffiModel.isPeerAndroid,
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -347,6 +353,8 @@ class _RawTouchGestureDetectorRegionState
       return;
     }
     if (!handleTouch) {
+      if (isSpecialHoldDragActive ||
+          _multiFingerInputState.isSpecialHoldDragInProgress) return;
       await inputModel.sendMouse('up', MouseButtons.left);
     }
   }
@@ -445,16 +453,56 @@ class _RawTouchGestureDetectorRegionState
     _touchModePanStarted = false;
   }
 
-  // scale + pan event
-  onTwoFingerScaleStart(ScaleStartDetails d) {
+  Future<void> _startMultiFingerGesture(ScaleStartDetails d,
+      {required bool releaseLeftButton}) async {
     _lastTapDownDetails = null;
     if (isNotTouchBasedDevice()) {
       return;
     }
-    if (isSpecialHoldDragActive) {
-      // Initialize the last focal point to calculate deltas manually.
-      _lastSpecialHoldDragFocalPoint = d.focalPoint;
+    final allowGenericLeftButtonRelease = _multiFingerInputState.startGesture(
+      specialHoldDragActive: isSpecialHoldDragActive,
+      focalX: d.focalPoint.dx,
+      focalY: d.focalPoint.dy,
+    );
+    if (releaseLeftButton && allowGenericLeftButtonRelease) {
+      _touchModePanStarted = false;
+      await inputModel.sendMouse('up', MouseButtons.left);
     }
+  }
+
+  Future<bool> _updateSpecialHoldDrag(ScaleUpdateDetails d) async {
+    final update = _multiFingerInputState.updateSpecialHoldDrag(
+      specialHoldDragActive: isSpecialHoldDragActive,
+      focalX: d.focalPoint.dx,
+      focalY: d.focalPoint.dy,
+    );
+    return _applySpecialHoldDragUpdate(update, d);
+  }
+
+  Future<bool> _applySpecialHoldDragUpdate(
+      SpecialHoldDragUpdate update, ScaleUpdateDetails d) async {
+    if (!update.handled) {
+      return false;
+    }
+    if (update.deltaX != 0 || update.deltaY != 0) {
+      await ffi.cursorModel.updatePan(
+        Offset(update.deltaX, update.deltaY),
+        d.focalPoint,
+        handleTouch,
+      );
+    }
+    return true;
+  }
+
+  bool _endMultiFingerGesture() {
+    return _multiFingerInputState.endOrCancelGesture(
+      specialHoldDragActive: isSpecialHoldDragActive,
+    );
+  }
+
+  // scale + pan event
+  onTwoFingerScaleStart(ScaleStartDetails d) async {
+    await _startMultiFingerGesture(d, releaseLeftButton: false);
   }
 
   onTwoFingerScaleUpdate(ScaleUpdateDetails d) async {
@@ -462,12 +510,7 @@ class _RawTouchGestureDetectorRegionState
       return;
     }
 
-    // If in special drag mode, perform a pan instead of a scale.
-    if (isSpecialHoldDragActive) {
-      // Calculate delta manually to avoid the jumpy behavior.
-      final delta = d.focalPoint - _lastSpecialHoldDragFocalPoint;
-      _lastSpecialHoldDragFocalPoint = d.focalPoint;
-      await ffi.cursorModel.updatePan(delta * 2.0, d.focalPoint, handleTouch);
+    if (await _updateSpecialHoldDrag(d)) {
       return;
     }
 
@@ -493,6 +536,7 @@ class _RawTouchGestureDetectorRegionState
   }
 
   onTwoFingerScaleEnd(ScaleEndDetails d) async {
+    final allowGenericLeftButtonRelease = _endMultiFingerGesture();
     if (isNotTouchBasedDevice()) {
       return;
     }
@@ -508,7 +552,64 @@ class _RawTouchGestureDetectorRegionState
       // No idea why we need to set the view style to "" here.
       // bind.sessionSetViewStyle(sessionId: sessionId, value: "");
     }
-    if (!isSpecialHoldDragActive) {
+    if (allowGenericLeftButtonRelease) {
+      await inputModel.sendMouse('up', MouseButtons.left);
+    }
+  }
+
+  onTwoFingerScrollStart(ScaleStartDetails d) async {
+    _multiFingerInputState.startScroll();
+    await _startMultiFingerGesture(d, releaseLeftButton: true);
+  }
+
+  onTwoFingerScrollUpdate(ScaleUpdateDetails d) async {
+    if (d.pointerCount != 2 || isNotTouchBasedDevice()) {
+      return;
+    }
+    final update = _multiFingerInputState.routeScrollUpdate(
+      specialHoldDragActive: isSpecialHoldDragActive,
+      focalX: d.focalPoint.dx,
+      focalY: d.focalPoint.dy,
+      deltaY: d.focalPointDelta.dy,
+    );
+    if (await _applySpecialHoldDragUpdate(update.specialHoldDrag, d)) {
+      return;
+    }
+    if (update.scrollDirection != 0) {
+      inputModel.scroll(update.scrollDirection);
+    }
+  }
+
+  onTwoFingerScrollEnd(ScaleEndDetails d) async {
+    _multiFingerInputState.endScroll();
+    final allowGenericLeftButtonRelease = _endMultiFingerGesture();
+    if (!isNotTouchBasedDevice() && allowGenericLeftButtonRelease) {
+      await inputModel.sendMouse('up', MouseButtons.left);
+    }
+  }
+
+  onThreeFingerScaleStart(ScaleStartDetails d) async {
+    _multiFingerInputState.startScale();
+    await _startMultiFingerGesture(d, releaseLeftButton: true);
+  }
+
+  onThreeFingerScaleUpdate(ScaleUpdateDetails d) async {
+    if (d.pointerCount != 3 || isNotTouchBasedDevice()) {
+      return;
+    }
+    if (await _updateSpecialHoldDrag(d)) {
+      return;
+    }
+    ffi.canvasModel
+        .updateScale(_multiFingerInputState.updateScale(d.scale), d.focalPoint);
+    ffi.canvasModel.panX(d.focalPointDelta.dx);
+    ffi.canvasModel.panY(d.focalPointDelta.dy);
+  }
+
+  onThreeFingerScaleEnd(ScaleEndDetails d) async {
+    _multiFingerInputState.endScale();
+    final allowGenericLeftButtonRelease = _endMultiFingerGesture();
+    if (!isNotTouchBasedDevice() && allowGenericLeftButtonRelease) {
       await inputModel.sendMouse('up', MouseButtons.left);
     }
   }
@@ -517,13 +618,13 @@ class _RawTouchGestureDetectorRegionState
   get onThreeFingerVerticalDragUpdate => ffi.ffiModel.isPeerAndroid
       ? null
       : (d) {
-          _mouseScrollIntegral += d.delta.dy / 4;
-          if (_mouseScrollIntegral > 1) {
+          _legacyMouseScrollIntegral += d.delta.dy / 4;
+          if (_legacyMouseScrollIntegral > 1) {
             inputModel.scroll(1);
-            _mouseScrollIntegral = 0;
-          } else if (_mouseScrollIntegral < -1) {
+            _legacyMouseScrollIntegral = 0;
+          } else if (_legacyMouseScrollIntegral < -1) {
             inputModel.scroll(-1);
-            _mouseScrollIntegral = 0;
+            _legacyMouseScrollIntegral = 0;
           }
         };
 
@@ -572,16 +673,25 @@ class _RawTouchGestureDetectorRegionState
       }),
       CustomTouchGestureRecognizer:
           GestureRecognizerFactoryWithHandlers<CustomTouchGestureRecognizer>(
-              () => CustomTouchGestureRecognizer(), (instance) {
+              () => CustomTouchGestureRecognizer(
+                    multiFingerGestureMode: multiFingerGestureMode,
+                  ), (instance) {
         instance.onOneFingerPanStart =
             (DragStartDetails d) => onOneFingerPanStart(context, d);
         instance
+          ..multiFingerGestureMode = multiFingerGestureMode
           ..onOneFingerPanUpdate = onOneFingerPanUpdate
           ..onOneFingerPanEnd = onOneFingerPanEnd
           ..onOneFingerPanCancel = onOneFingerPanCancel
           ..onTwoFingerScaleStart = onTwoFingerScaleStart
           ..onTwoFingerScaleUpdate = onTwoFingerScaleUpdate
           ..onTwoFingerScaleEnd = onTwoFingerScaleEnd
+          ..onTwoFingerScrollStart = onTwoFingerScrollStart
+          ..onTwoFingerScrollUpdate = onTwoFingerScrollUpdate
+          ..onTwoFingerScrollEnd = onTwoFingerScrollEnd
+          ..onThreeFingerScaleStart = onThreeFingerScaleStart
+          ..onThreeFingerScaleUpdate = onThreeFingerScaleUpdate
+          ..onThreeFingerScaleEnd = onThreeFingerScaleEnd
           ..onThreeFingerVerticalDragUpdate = onThreeFingerVerticalDragUpdate;
       }),
     };

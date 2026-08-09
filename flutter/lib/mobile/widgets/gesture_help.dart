@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/widgets/gestures.dart';
 import 'package:flutter_hbb/models/input_model.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:get/get.dart';
@@ -42,11 +43,13 @@ class GestureHelp extends StatefulWidget {
       required this.touchMode,
       required this.onTouchModeChange,
       required this.virtualMouseMode,
+      required this.multiFingerGestureMode,
       this.inputModel})
       : super(key: key);
   final bool touchMode;
   final OnTouchModeChange onTouchModeChange;
   final VirtualMouseMode virtualMouseMode;
+  final MultiFingerGestureMode multiFingerGestureMode;
   final InputModel? inputModel;
 
   @override
@@ -75,6 +78,10 @@ class _GestureHelpState extends State<GestureHelp> {
 
   @override
   Widget build(BuildContext context) {
+    final useTwoFingerScroll = widget.multiFingerGestureMode ==
+        MultiFingerGestureMode.twoFingerScrollThreeFingerScale;
+    final multiFingerHelpKeys =
+        resolveMultiFingerGestureHelpKeys(widget.multiFingerGestureMode);
     final size = MediaQuery.of(context).size;
     final space = 12.0;
     var width = size.width - 2 * space;
@@ -298,18 +305,20 @@ class _GestureHelpState extends State<GestureHelp> {
                               translate("Mouse Drag")),
                           GestureInfo(
                               width,
-                              GestureIcons.iconGestureFThreeFingers,
-                              translate("Three-Finger vertically"),
+                              useTwoFingerScroll
+                                  ? GestureIcons.iconGestureFDragUpDown_
+                                  : GestureIcons.iconGestureFThreeFingers,
+                              translate(multiFingerHelpKeys.scroll),
                               translate("Mouse Wheel")),
                           GestureInfo(
                               width,
                               GestureIcons.iconGestureFDrag,
-                              translate("Two-Finger Move"),
+                              translate(multiFingerHelpKeys.move),
                               translate("Canvas Move")),
                           GestureInfo(
                               width,
                               GestureIcons.iconGesturePinch,
-                              translate("Pinch to Zoom"),
+                              translate(multiFingerHelpKeys.zoom),
                               translate("Canvas Zoom")),
                         ]
                       : [
@@ -330,18 +339,20 @@ class _GestureHelpState extends State<GestureHelp> {
                               translate("Mouse Drag")),
                           GestureInfo(
                               width,
-                              GestureIcons.iconGestureFThreeFingers,
-                              translate("Three-Finger vertically"),
+                              useTwoFingerScroll
+                                  ? GestureIcons.iconGestureFDragUpDown_
+                                  : GestureIcons.iconGestureFThreeFingers,
+                              translate(multiFingerHelpKeys.scroll),
                               translate("Mouse Wheel")),
                           GestureInfo(
                               width,
                               GestureIcons.iconGestureFDrag,
-                              translate("Two-Finger Move"),
+                              translate(multiFingerHelpKeys.move),
                               translate("Canvas Move")),
                           GestureInfo(
                               width,
                               GestureIcons.iconGesturePinch,
-                              translate("Pinch to Zoom"),
+                              translate(multiFingerHelpKeys.zoom),
                               translate("Canvas Zoom")),
                         ],
                 )),
