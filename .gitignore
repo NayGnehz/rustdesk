@@ -13,6 +13,10 @@ src/version.rs
 *exe
 *tgz
 cert.pfx
+*.jks
+*.keystore
+*.p12
+key.properties
 *.bak
 *png
 *svg

@@ -192,14 +192,14 @@ jobs:
           flutter build apk --release --target-platform android-arm64 --split-per-abi
           popd
 
-      - name: Verify and package APK
-        id: package
+      - name: Verify APK for signing
+        id: intermediate
         shell: bash
         run: |
           set -euo pipefail
           source_apk="flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk"
-          output_dir="artifacts"
-          output_apk="${output_dir}/rustdesk-naygnehz-arm64-v8a.apk"
+          output_dir="intermediate"
+          output_apk="${output_dir}/rustdesk-naygnehz-arm64-v8a-intermediate.apk"
           mkdir -p "${output_dir}"
           cp "${source_apk}" "${output_apk}"
 
@@ -218,14 +218,99 @@ jobs:
           grep -Fx 'lib/arm64-v8a/librustdesk.so' <<< "${archive_entries}" > /dev/null
           grep -Fx 'lib/arm64-v8a/libc++_shared.so' <<< "${archive_entries}" > /dev/null
 
+          echo "apk=${output_apk}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload APK for signing
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rustdesk-naygnehz-arm64-v8a-intermediate-${{ github.run_id }}
+          path: ${{ steps.intermediate.outputs.apk }}
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 3
+
+  sign-arm64:
+    name: Sign and verify Android arm64-v8a APK
+    needs: build-arm64
+    runs-on: ubuntu-24.04
+    environment: android-release
+    steps:
+      - name: Download APK for signing
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: rustdesk-naygnehz-arm64-v8a-intermediate-${{ github.run_id }}
+          path: intermediate
+
+      - name: Sign and verify APK
+        id: package
+        shell: bash
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          : "${ANDROID_RELEASE_KEYSTORE_BASE64:?Missing Android release keystore}"
+          : "${ANDROID_RELEASE_KEYSTORE_PASSWORD:?Missing Android release keystore password}"
+
+          input_apk="intermediate/rustdesk-naygnehz-arm64-v8a-intermediate.apk"
+          output_dir="artifacts"
+          output_apk="${output_dir}/rustdesk-naygnehz-arm64-v8a.apk"
+          key_store="${RUNNER_TEMP}/naygnehz-rustdesk-release.p12"
+          aligned_apk="${RUNNER_TEMP}/rustdesk-naygnehz-arm64-v8a-aligned.apk"
+          expected_cert="fd8c14b2845acd1df8ecc95b7a0fe1e28b2de37d0642b5a2a77c6ecde27d8a9b"
+          trap 'rm -f -- "${key_store}" "${aligned_apk}"' EXIT
+
+          mkdir -p "${output_dir}"
+          printf '%s' "${ANDROID_RELEASE_KEYSTORE_BASE64}" | base64 --decode > "${key_store}"
+          build_tools_dir="$(find "${ANDROID_SDK_ROOT}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          "${build_tools_dir}/zipalign" -P 16 -f 4 "${input_apk}" "${aligned_apk}"
+          "${build_tools_dir}/apksigner" sign \
+            --ks "${key_store}" \
+            --ks-type PKCS12 \
+            --ks-key-alias rustdesk-naygnehz-release \
+            --ks-pass env:ANDROID_RELEASE_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_RELEASE_KEYSTORE_PASSWORD \
+            --min-sdk-version 22 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out "${output_apk}" \
+            "${aligned_apk}"
+
+          signer_report="$("${build_tools_dir}/apksigner" verify --verbose --print-certs "${output_apk}")"
+          printf '%s\n' "${signer_report}"
+          grep -F 'Verified using v1 scheme (JAR signing): true' <<< "${signer_report}" > /dev/null
+          grep -F 'Verified using v2 scheme (APK Signature Scheme v2): true' <<< "${signer_report}" > /dev/null
+          grep -F 'Verified using v3 scheme (APK Signature Scheme v3): true' <<< "${signer_report}" > /dev/null
+          ! grep -F 'CN=Android Debug' <<< "${signer_report}" > /dev/null
+          "${build_tools_dir}/zipalign" -c -P 16 -v 4 "${output_apk}"
+
+          actual_cert="$(sed -n 's/^.*certificate SHA-256 digest: //p' <<< "${signer_report}" |
+            tr '[:upper:]' '[:lower:]' | sort -u)"
+          test "${actual_cert}" = "${expected_cert}"
+
+          badging="$("${build_tools_dir}/aapt" dump badging "${output_apk}")"
+          package_name="$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" <<< "${badging}")"
+          application_label="$(sed -n "s/^application-label:'\([^']*\)'.*/\1/p" <<< "${badging}")"
+          test "${package_name}" = "com.naygnehz.rustdesk"
+          test "${application_label}" = "RustDesk"
+
+          archive_entries="$(unzip -Z1 "${output_apk}")"
+          mapfile -t packaged_abis < <(printf '%s\n' "${archive_entries}" | sed -n 's#^lib/\([^/]*\)/.*#\1#p' | sort -u)
+          test "${#packaged_abis[@]}" -eq 1
+          test "${packaged_abis[0]}" = "arm64-v8a"
+          grep -Fx 'lib/arm64-v8a/librustdesk.so' <<< "${archive_entries}" > /dev/null
+          grep -Fx 'lib/arm64-v8a/libc++_shared.so' <<< "${archive_entries}" > /dev/null
+
           (cd "${output_dir}" && sha256sum "$(basename "${output_apk}")") | tee "${output_apk}.sha256"
           echo "apk=${output_apk}" >> "${GITHUB_OUTPUT}"
           echo "sha256=${output_apk}.sha256" >> "${GITHUB_OUTPUT}"
 
-      - name: Upload APK
+      - name: Upload signed APK
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: rustdesk-naygnehz-arm64-v8a-${{ github.run_number }}
+          name: rustdesk-naygnehz-arm64-v8a-release-${{ github.run_number }}-${{ github.run_attempt }}
           path: |
             ${{ steps.package.outputs.apk }}
             ${{ steps.package.outputs.sha256 }}
