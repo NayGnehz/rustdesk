@@ -778,5 +778,6 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Two-finger vertical swipe", "双指垂直滑动"),
         ("Three-finger move", "三指移动"),
         ("Three-finger pinch", "三指捏合"),
+        ("Switch display orientation", "切换显示方向"),
     ].iter().cloned().collect();
 }

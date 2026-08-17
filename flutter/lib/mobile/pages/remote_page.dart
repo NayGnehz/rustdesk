@@ -1292,6 +1292,8 @@ void showOptions(
     }
   }
 
+  final switchDisplayOrientationMenu = getSwitchDisplayOrientationMenu(gFFI);
+
   dialogManager.show((setState, close, context) {
     var viewStyle =
         (viewStyleRadios.isNotEmpty ? viewStyleRadios[0].groupValue : '').obs;
@@ -1420,10 +1422,26 @@ void showOptions(
       popupDialogMenus.add(const Divider(color: MyTheme.border));
     }
 
+    final orientationMenus = <Widget>[
+      if (switchDisplayOrientationMenu != null) ...[
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          visualDensity: VisualDensity.compact,
+          title: switchDisplayOrientationMenu.child,
+          onTap: () {
+            close();
+            switchDisplayOrientationMenu.onPressed?.call();
+          },
+        ),
+        const Divider(color: MyTheme.border),
+      ],
+    ];
+
     return CustomAlertDialog(
       content: Column(
           mainAxisSize: MainAxisSize.min,
           children: displays +
+              orientationMenus +
               radios +
               popupDialogMenus +
               toggles +
@@ -1497,6 +1515,30 @@ TTextMenu? getResolutionMenu(FFI ffi, String id) {
       }, clickMaskDismiss: true, backDismiss: true).then((value) {
         _disableAndroidSoftKeyboard();
       });
+    },
+  );
+}
+
+TTextMenu? getSwitchDisplayOrientationMenu(FFI ffi) {
+  final ffiModel = ffi.ffiModel;
+  final pi = ffiModel.pi;
+  final display = pi.tryGetDisplayIfNotAllDisplay(display: pi.currentDisplay);
+  if (!(ffiModel.keyboard &&
+      pi.platform == kPeerPlatformWindows &&
+      display != null)) {
+    return null;
+  }
+  return TTextMenu(
+    child: Text(translate('Switch display orientation')),
+    onPressed: () {
+      final d = pi.tryGetDisplayIfNotAllDisplay(display: pi.currentDisplay);
+      if (d == null) return;
+      bind.sessionChangeResolution(
+        sessionId: ffi.sessionId,
+        display: pi.currentDisplay,
+        width: d.height,
+        height: d.width,
+      );
     },
   );
 }
