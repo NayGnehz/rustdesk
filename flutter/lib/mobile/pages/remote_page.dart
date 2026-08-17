@@ -1425,7 +1425,7 @@ void showOptions(
     final orientationMenus = <Widget>[
       if (switchDisplayOrientationMenu != null) ...[
         ListTile(
-          contentPadding: EdgeInsets.zero,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16),
           visualDensity: VisualDensity.compact,
           title: switchDisplayOrientationMenu.child,
           onTap: () {
@@ -1522,23 +1522,20 @@ TTextMenu? getResolutionMenu(FFI ffi, String id) {
 TTextMenu? getSwitchDisplayOrientationMenu(FFI ffi) {
   final ffiModel = ffi.ffiModel;
   final pi = ffiModel.pi;
-  final display = pi.tryGetDisplayIfNotAllDisplay(display: pi.currentDisplay);
-  if (!(ffiModel.keyboard &&
-      pi.platform == kPeerPlatformWindows &&
-      display != null)) {
+  if (!(ffiModel.keyboard && pi.platform == kPeerPlatformWindows)) {
     return null;
   }
   return TTextMenu(
     child: Text(translate('Switch display orientation')),
     onPressed: () {
-      final d = pi.tryGetDisplayIfNotAllDisplay(display: pi.currentDisplay);
-      if (d == null) return;
-      bind.sessionChangeResolution(
-        sessionId: ffi.sessionId,
-        display: pi.currentDisplay,
-        width: d.height,
-        height: d.width,
-      );
+      // Triggers a global-hotkey shortcut configured on the Windows side.
+      final im = ffi.inputModel;
+      final oldCtrl = im.ctrl, oldAlt = im.alt;
+      im.ctrl = true;
+      im.alt = true;
+      im.inputKey('VK_F12');
+      im.ctrl = oldCtrl;
+      im.alt = oldAlt;
     },
   );
 }
